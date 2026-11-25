@@ -23,6 +23,7 @@ from typing import Any
 
 from app.lake_store import lake_store, BatchRecord, LakeSnapshot, PartitionFile
 from app.pipeline.chain_core import ChainContext, StepFunc
+from app.services.retention_window import RetentionWindowService
 
 
 # ============================================================
@@ -590,18 +591,28 @@ def _step_audit_mark_window(ctx: ChainContext) -> ChainContext:
 
 
 def _step_reclaim_expired(ctx: ChainContext) -> ChainContext:
-    """到期回收：解除审计标记后回收过期分区。"""
+    """到期回收：按湖表+分区读取审计解除记录，只回收已解除约束的分区。
+
+    仍在审核的分区一律拦截、保持可读；回收提交幂等，
+    释放字节以存储侧逐项确认的结果为准。
+    """
     lk = ctx.lake_table
-    audit = ctx.output.get("audit_mark", {})
-    if audit.get("block_reclaim_until_audit"):
-        # 模拟先解除审计标记
+    retention = ctx.output.get("retention", {})
+    retention_days = int(retention.get("retention_days", 90))
+    svc = RetentionWindowService()
+    expired_ids = svc.identify_expired_partitions(lk, retention_days)
+    if not expired_ids:
         ctx.output["audit_cleared"] = True
-    # 回收过期分区文件
-    expired_files = lake_store.list_files(lk, "20261101")
-    expired_ids = [f.file_id for f in expired_files if f.file_bytes < 2000]
-    removed = lake_store.remove_files(lk, expired_ids)
-    ctx.output["reclaimed_file_count"] = removed
-    ctx.output["reclaimed_bytes"] = sum(f.file_bytes for f in expired_files if f.file_id in expired_ids)
+        ctx.output["reclaimed_file_count"] = 0
+        ctx.output["reclaimed_bytes"] = 0
+        ctx.output["blocked_partitions"] = []
+        return ctx
+    result = svc.execute_reclaim(lk, file_ids=expired_ids, round_id=f"reclaim-{lk}")
+    ctx.output["audit_cleared"] = not result.get("blocked_partitions")
+    ctx.output["reclaimed_file_count"] = result.get("reclaimed_count", 0)
+    ctx.output["reclaimed_bytes"] = result.get("reclaimed_bytes", 0)
+    ctx.output["blocked_partitions"] = result.get("blocked_partitions", [])
+    ctx.output["reclaim_round_id"] = result.get("round_id")
     return ctx
 
 

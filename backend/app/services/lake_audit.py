@@ -68,3 +68,23 @@ class LakeAuditService(BaseModuleService):
             "sealed_count": sealed,
             "seal_time": time.time(),
         }
+
+    def list_retention_requests(self, lake_table: str | None = None,
+                                request_type: str | None = None) -> list[dict[str, Any]]:
+        """从审计入口查询解除审计/重新保留申请及其与回收提交的冲突状态。"""
+        type_labels = {"release_audit": "解除审计", "re_retain": "重新保留"}
+        requests = lake_store.list_retention_requests(lake_table, request_type)
+        return [
+            {
+                "request_id": req.request_id,
+                "lake_table": req.lake_table,
+                "partition_key": req.partition_key,
+                "request_type": req.request_type,
+                "request_type_label": type_labels.get(req.request_type, req.request_type),
+                "status": req.status,
+                "conflict_with": req.conflict_with,
+                "operator": req.operator,
+                "created_at": req.created_at,
+            }
+            for req in requests
+        ]
